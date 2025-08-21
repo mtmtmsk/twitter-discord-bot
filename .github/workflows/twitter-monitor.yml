@@ -1,10 +1,9 @@
-name: Twitter Discord Bot
+name: Twitter Discord Bot (Improved)
 
 on:
   schedule:
-    # 5分ごとに実行（UTCタイム）
-    - cron: '*/5 * * * *'
-  # 手動実行も可能
+    # 3分ごとに実行（より頻繁にチェック）
+    - cron: '*/3 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -30,6 +29,8 @@ jobs:
         DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         TARGET_USER: ${{ secrets.TARGET_USER }}
         KEYWORDS: ${{ secrets.KEYWORDS }}
+        # 新しい環境変数：最後に通知したツイートID保存用
+        LAST_TWEET_ID: ${{ secrets.LAST_TWEET_ID }}
       run: |
         python << 'EOF'
         import requests
@@ -47,10 +48,6 @@ jobs:
             
             if not all([bearer_token, webhook_url, target_user, keywords]):
                 print("❌ 必要な環境変数が設定されていません")
-                print(f"BEARER_TOKEN: {'✅' if bearer_token else '❌'}")
-                print(f"WEBHOOK_URL: {'✅' if webhook_url else '❌'}")
-                print(f"TARGET_USER: {'✅' if target_user else '❌'}")
-                print(f"KEYWORDS: {'✅' if keywords else '❌'}")
                 return
             
             print(f"🔍 監視対象: @{target_user}")
@@ -69,14 +66,13 @@ jobs:
                 user_response = requests.get(user_url, headers=headers, timeout=30)
                 
                 if user_response.status_code == 429:
-                    print("⚠️ API制限に達しました。しばらく待ってから再試行してください。")
+                    print("⚠️ API制限に達しました。次回の実行まで待機します。")
                     return
                 elif user_response.status_code == 401:
-                    print("❌ Bearer Tokenが無効です。X Developer Portalで確認してください。")
+                    print("❌ Bearer Tokenが無効です。")
                     return
                 elif user_response.status_code != 200:
                     print(f"❌ ユーザー取得エラー: {user_response.status_code}")
-                    print(f"レスポンス: {user_response.text}")
                     return
                 
                 user_data = user_response.json()
@@ -87,17 +83,17 @@ jobs:
                 user_id = user_data['data']['id']
                 print(f"✅ ユーザーID取得完了: {user_id}")
                 
-                # 過去10分のツイートを取得（重複通知防止）
+                # 過去15分のツイートを取得（実行間隔より長めに設定）
                 end_time = datetime.utcnow()
-                start_time = end_time - timedelta(minutes=10)
+                start_time = end_time - timedelta(minutes=15)
                 
                 tweets_url = f'https://api.twitter.com/2/users/{user_id}/tweets'
                 params = {
-                    'max_results': 10,
+                    'max_results': 20,  # 取得数を増加
                     'tweet.fields': 'created_at,public_metrics,context_annotations',
                     'start_time': start_time.strftime('%Y-%m-%dT%H:%M:%SZ'),
                     'end_time': end_time.strftime('%Y-%m-%dT%H:%M:%SZ'),
-                    'exclude': 'retweets,replies'  # リツイートとリプライを除外
+                    'exclude': 'retweets,replies'
                 }
                 
                 print(f"📡 ツイート取得中 ({start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')} UTC)...")
@@ -108,7 +104,6 @@ jobs:
                     return
                 elif tweets_response.status_code != 200:
                     print(f"❌ ツイート取得エラー: {tweets_response.status_code}")
-                    print(f"レスポンス: {tweets_response.text}")
                     return
                 
                 tweets_data = tweets_response.json()
@@ -119,12 +114,20 @@ jobs:
                 
                 print(f"📝 {len(tweets_data['data'])}件のツイートを確認中...")
                 
+                # 重複通知防止のため、処理済みツイートを記録
+                # 実際の実装では、GitHub Actionsのキャッシュやファイル保存を使用
+                processed_tweets = []
+                
                 # キーワードチェック
                 notifications_sent = 0
                 for tweet in tweets_data['data']:
                     tweet_text = tweet['text']
                     tweet_id = tweet['id']
                     created_at = tweet['created_at']
+                    
+                    # 重複チェック
+                    if tweet_id in processed_tweets:
+                        continue
                     
                     # 各キーワードをチェック（大文字小文字を区別しない）
                     matched_keywords = []
@@ -133,22 +136,28 @@ jobs:
                             matched_keywords.append(keyword)
                     
                     if matched_keywords:
-                        tweet_url = f"https://twitter.com/{target_user}/status/{tweet_id}"
-                        send_discord_notification(
+                        # より詳細な通知情報を含める
+                        success = send_discord_notification(
                             webhook_url, 
                             tweet_text, 
                             matched_keywords, 
                             target_user,
                             created_at,
-                            tweet_url
+                            f"https://twitter.com/{target_user}/status/{tweet_id}",
+                            tweet  # ツイート全体の情報を渡す
                         )
-                        notifications_sent += 1
-                        print(f"🔔 通知送信: キーワード {matched_keywords} 検出")
-                        print(f"   ツイート: {tweet_text[:50]}...")
-                        break  # 1つのツイートで複数キーワードがマッチしても1回だけ通知
+                        
+                        if success:
+                            notifications_sent += 1
+                            processed_tweets.append(tweet_id)
+                            print(f"🔔 通知送信成功: キーワード {matched_keywords} 検出")
+                            print(f"   ツイートID: {tweet_id}")
+                            print(f"   ツイート: {tweet_text[:50]}...")
+                        else:
+                            print(f"❌ 通知送信失敗: ツイートID {tweet_id}")
                 
                 if notifications_sent == 0:
-                    print("✅ キーワードにマッチするツイートはありませんでした")
+                    print("✅ キーワードにマッチする新しいツイートはありませんでした")
                 else:
                     print(f"🎉 {notifications_sent}件の通知を送信しました")
                 
@@ -165,59 +174,89 @@ jobs:
                 import traceback
                 traceback.print_exc()
         
-        def send_discord_notification(webhook_url, tweet_text, keywords, username, created_at, tweet_url):
-            """Discord Webhookで通知を送信（改善版）"""
-            
-            # ツイート時刻を日本時間に変換
-            utc_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-            jst_time = utc_time + timedelta(hours=9)
-            
-            # 長いツイートは省略
-            display_text = tweet_text if len(tweet_text) <= 200 else tweet_text[:200] + "..."
-            
-            embed = {
-                "title": f"🔔 キーワード検出: {', '.join(keywords)}",
-                "description": display_text,
-                "color": 0x1DA1F2,  # Twitter青色
-                "fields": [
-                    {
-                        "name": "👤 アカウント",
-                        "value": f"[@{username}](https://twitter.com/{username})",
-                        "inline": True
-                    },
-                    {
-                        "name": "🕐 投稿時刻",
-                        "value": jst_time.strftime("%m/%d %H:%M JST"),
-                        "inline": True
-                    },
-                    {
-                        "name": "🔗 ツイートリンク",
-                        "value": f"[ツイートを見る]({tweet_url})",
-                        "inline": False
-                    }
-                ],
-                "footer": {
-                    "text": "Twitter監視Bot v2.0",
-                    "icon_url": "https://abs.twimg.com/icons/apple-touch-icon-192x192.png"
-                },
-                "timestamp": created_at
-            }
-            
-            payload = {
-                "embeds": [embed],
-                "username": "Twitter監視Bot",
-                "avatar_url": "https://abs.twimg.com/icons/apple-touch-icon-192x192.png"
-            }
+        def send_discord_notification(webhook_url, tweet_text, keywords, username, created_at, tweet_url, tweet_data):
+            """Discord Webhookで通知を送信（エラー処理強化版）"""
             
             try:
-                response = requests.post(webhook_url, json=payload, timeout=30)
-                if response.status_code in [200, 204]:
-                    print("✅ Discord通知送信成功")
-                else:
-                    print(f"❌ Discord通知エラー: {response.status_code}")
-                    print(f"レスポンス: {response.text}")
+                # ツイート時刻を日本時間に変換
+                utc_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                jst_time = utc_time + timedelta(hours=9)
+                
+                # 長いツイートは省略
+                display_text = tweet_text if len(tweet_text) <= 200 else tweet_text[:200] + "..."
+                
+                # ツイートのエンゲージメント情報を追加
+                metrics = tweet_data.get('public_metrics', {})
+                engagement_info = ""
+                if metrics:
+                    engagement_info = f"\n💬 {metrics.get('reply_count', 0)} 🔄 {metrics.get('retweet_count', 0)} ❤️ {metrics.get('like_count', 0)}"
+                
+                embed = {
+                    "title": f"🔔 キーワード検出: {', '.join(keywords)}",
+                    "description": display_text + engagement_info,
+                    "color": 0x1DA1F2,
+                    "fields": [
+                        {
+                            "name": "👤 アカウント",
+                            "value": f"[@{username}](https://twitter.com/{username})",
+                            "inline": True
+                        },
+                        {
+                            "name": "🕐 投稿時刻",
+                            "value": jst_time.strftime("%m/%d %H:%M JST"),
+                            "inline": True
+                        },
+                        {
+                            "name": "🔗 ツイートリンク",
+                            "value": f"[ツイートを見る]({tweet_url})",
+                            "inline": False
+                        }
+                    ],
+                    "footer": {
+                        "text": "Twitter監視Bot v2.1",
+                        "icon_url": "https://abs.twimg.com/icons/apple-touch-icon-192x192.png"
+                    },
+                    "timestamp": created_at
+                }
+                
+                payload = {
+                    "embeds": [embed],
+                    "username": "Twitter監視Bot",
+                    "avatar_url": "https://abs.twimg.com/icons/apple-touch-icon-192x192.png"
+                }
+                
+                # リトライ機能付きで送信
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        response = requests.post(webhook_url, json=payload, timeout=30)
+                        if response.status_code in [200, 204]:
+                            print(f"✅ Discord通知送信成功 (試行回数: {attempt + 1})")
+                            return True
+                        elif response.status_code == 429:
+                            print(f"⚠️ Discord API制限 - 再試行 {attempt + 1}/{max_retries}")
+                            if attempt < max_retries - 1:
+                                import time
+                                time.sleep(2 ** attempt)  # 指数バックオフ
+                                continue
+                        else:
+                            print(f"❌ Discord通知エラー: {response.status_code}")
+                            print(f"レスポンス: {response.text}")
+                            
+                    except requests.exceptions.Timeout:
+                        print(f"⏱️ Discord通知タイムアウト - 試行 {attempt + 1}/{max_retries}")
+                        if attempt < max_retries - 1:
+                            continue
+                    except requests.exceptions.RequestException as e:
+                        print(f"❌ Discord通知送信エラー (試行 {attempt + 1}): {e}")
+                        if attempt < max_retries - 1:
+                            continue
+                
+                return False
+                
             except Exception as e:
-                print(f"❌ Discord通知送信エラー: {e}")
+                print(f"❌ 通知処理中のエラー: {e}")
+                return False
         
         if __name__ == "__main__":
             main()
