@@ -1,0 +1,159 @@
+name: Twitter Discord Bot
+
+on:
+  schedule:
+    # 10分ごとに実行（UTCタイム）
+    - cron: '*/10 * * * *'
+  # 手動実行も可能
+  workflow_dispatch:
+
+jobs:
+  monitor-twitter:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies
+      run: |
+        pip install requests
+    
+    - name: Run Twitter monitor
+      env:
+        BEARER_TOKEN: ${{ secrets.BEARER_TOKEN }}
+        DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        TARGET_USER: ${{ secrets.TARGET_USER }}
+        KEYWORDS: ${{ secrets.KEYWORDS }}
+      run: |
+        python << 'EOF'
+        import requests
+        import os
+        import json
+        from datetime import datetime, timedelta
+        
+        def main():
+            # 設定読み込み
+            bearer_token = os.environ.get('BEARER_TOKEN')
+            webhook_url = os.environ.get('DISCORD_WEBHOOK')
+            target_user = os.environ.get('TARGET_USER')
+            keywords = os.environ.get('KEYWORDS', '').split(',')
+            
+            if not all([bearer_token, webhook_url, target_user]):
+                print("必要な環境変数が設定されていません")
+                return
+            
+            # Twitter API headers
+            headers = {
+                'Authorization': f'Bearer {bearer_token}',
+                'User-Agent': 'TwitterBot/1.0'
+            }
+            
+            try:
+                # ユーザーIDを取得
+                user_url = f'https://api.twitter.com/2/users/by/username/{target_user}'
+                user_response = requests.get(user_url, headers=headers, timeout=30)
+                
+                if user_response.status_code != 200:
+                    print(f"ユーザー取得エラー: {user_response.status_code}")
+                    print(user_response.text)
+                    return
+                
+                user_data = user_response.json()
+                if 'data' not in user_data:
+                    print("ユーザーが見つかりません")
+                    return
+                
+                user_id = user_data['data']['id']
+                
+                # 過去30分のツイートを取得（重複通知防止）
+                end_time = datetime.utcnow()
+                start_time = end_time - timedelta(minutes=30)
+                
+                tweets_url = f'https://api.twitter.com/2/users/{user_id}/tweets'
+                params = {
+                    'max_results': 10,
+                    'tweet.fields': 'created_at,public_metrics',
+                    'start_time': start_time.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                    'end_time': end_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+                }
+                
+                tweets_response = requests.get(tweets_url, headers=headers, params=params, timeout=30)
+                
+                if tweets_response.status_code != 200:
+                    print(f"ツイート取得エラー: {tweets_response.status_code}")
+                    print(tweets_response.text)
+                    return
+                
+                tweets_data = tweets_response.json()
+                
+                if 'data' not in tweets_data:
+                    print("新しいツイートはありません")
+                    return
+                
+                # キーワードチェック
+                for tweet in tweets_data['data']:
+                    tweet_text = tweet['text']
+                    created_at = tweet['created_at']
+                    
+                    for keyword in keywords:
+                        keyword = keyword.strip()
+                        if keyword and keyword.lower() in tweet_text.lower():
+                            send_discord_notification(
+                                webhook_url, 
+                                tweet_text, 
+                                keyword, 
+                                target_user,
+                                created_at
+                            )
+                            print(f"通知送信: キーワード '{keyword}' 検出")
+                            break  # 1つのツイートで複数キーワードがマッチしても1回だけ通知
+                
+            except requests.exceptions.RequestException as e:
+                print(f"リクエストエラー: {e}")
+            except Exception as e:
+                print(f"予期しないエラー: {e}")
+        
+        def send_discord_notification(webhook_url, tweet_text, keyword, username, created_at):
+            """Discord Webhookで通知を送信"""
+            embed = {
+                "title": f"🔔 キーワード「{keyword}」を検出！",
+                "description": tweet_text,
+                "color": 3447003,  # 青色
+                "fields": [
+                    {
+                        "name": "アカウント",
+                        "value": f"@{username}",
+                        "inline": True
+                    },
+                    {
+                        "name": "投稿時刻",
+                        "value": created_at,
+                        "inline": True
+                    }
+                ],
+                "footer": {
+                    "text": "Twitter監視Bot"
+                }
+            }
+            
+            payload = {
+                "embeds": [embed]
+            }
+            
+            try:
+                response = requests.post(webhook_url, json=payload, timeout=30)
+                if response.status_code not in [200, 204]:
+                    print(f"Discord通知エラー: {response.status_code}")
+                    print(response.text)
+            except Exception as e:
+                print(f"Discord通知送信エラー: {e}")
+        
+        if __name__ == "__main__":
+            main()
+        EOF
