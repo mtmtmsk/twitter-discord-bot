@@ -37,7 +37,7 @@ jobs:
     
     - name: Install dependencies
       run: |
-        pip install requests pytz googletrans==4.0.0rc1
+        pip install requests pytz
     
     - name: Run Twitter monitor
       env:
@@ -45,9 +45,6 @@ jobs:
         DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         TARGET_USER: ${{ secrets.TARGET_USER }}
         KEYWORDS: ${{ secrets.KEYWORDS }}
-        # 翻訳機能設定
-        AUTO_TRANSLATE: ${{ secrets.AUTO_TRANSLATE || 'true' }}
-        TRANSLATE_TO: ${{ secrets.TRANSLATE_TO || 'ja' }}
         # デバッグ用設定
         DEBUG_MODE: ${{ secrets.DEBUG_MODE || 'false' }}
         MAX_TWEETS_PER_RUN: ${{ secrets.MAX_TWEETS_PER_RUN || '10' }}
@@ -62,7 +59,6 @@ jobs:
         import time
         import traceback
         import pytz
-        from googletrans import Translator
         
         class TwitterMonitorBot:
             def __init__(self):
@@ -74,11 +70,6 @@ jobs:
                 self.debug_mode = os.environ.get('DEBUG_MODE', 'false').lower() == 'true'
                 self.max_tweets_per_run = int(os.environ.get('MAX_TWEETS_PER_RUN', '10'))
                 self.notification_cooldown = int(os.environ.get('NOTIFICATION_COOLDOWN', '300'))
-                
-                # 翻訳設定
-                self.auto_translate = os.environ.get('AUTO_TRANSLATE', 'true').lower() == 'true'
-                self.translate_to = os.environ.get('TRANSLATE_TO', 'ja')
-                self.translator = Translator() if self.auto_translate else None
                 
                 # 統計情報
                 self.stats = {
@@ -101,7 +92,6 @@ jobs:
                 self.log(f"🤖 Twitter Monitor Bot v3.0 起動")
                 self.log(f"🎯 監視対象: @{self.target_user}")
                 self.log(f"🔑 キーワード: {', '.join(self.keywords)}")
-                self.log(f"🌐 自動翻訳: {'ON' if self.auto_translate else 'OFF'} ({'→' + self.translate_to if self.auto_translate else ''})")
                 self.log(f"🐛 デバッグモード: {'ON' if self.debug_mode else 'OFF'}")
         
             def log(self, message, level="INFO"):
@@ -276,42 +266,6 @@ jobs:
                     self.log(f"❌ ツイートデータ解析エラー: {e}", "ERROR")
                     return None
         
-            def translate_text(self, text, target_lang='ja'):
-                """テキスト翻訳（エラー処理付き）"""
-                if not self.auto_translate or not self.translator:
-                    return text, None
-                
-                try:
-                    # 元の言語を検出
-                    detection = self.translator.detect(text)
-                    source_lang = detection.lang
-                    confidence = detection.confidence
-                    
-                    # 既に目標言語の場合は翻訳をスキップ
-                    if source_lang == target_lang:
-                        self.log(f"🌐 翻訳不要: 既に{target_lang}です")
-                        return text, source_lang
-                    
-                    # 信頼度が低い場合は翻訳をスキップ
-                    if confidence < 0.7:
-                        self.log(f"🌐 翻訳スキップ: 言語検出の信頼度が低い ({confidence:.2f})")
-                        return text, source_lang
-                    
-                    # 翻訳実行
-                    result = self.translator.translate(text, src=source_lang, dest=target_lang)
-                    translated_text = result.text
-                    
-                    self.log(f"🌐 翻訳完了: {source_lang} → {target_lang}")
-                    if self.debug_mode:
-                        self.log(f"   原文: {text[:50]}...")
-                        self.log(f"   翻訳: {translated_text[:50]}...")
-                    
-                    return translated_text, source_lang
-                    
-                except Exception as e:
-                    self.log(f"❌ 翻訳エラー: {e}", "WARNING")
-                    return text, None
-        
             def check_keywords(self, text, keywords):
                 """キーワードチェック（改善版）"""
                 matched_keywords = []
@@ -325,7 +279,7 @@ jobs:
                 return matched_keywords
         
             def send_discord_notification(self, tweet_text, matched_keywords, tweet_data):
-                """Discord通知送信（翻訳機能付き）"""
+                """Discord通知送信（エラー処理強化版）"""
                 try:
                     tweet_id = tweet_data['id']
                     created_at = tweet_data['created_at']
@@ -334,35 +288,16 @@ jobs:
                     utc_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
                     jst_time = utc_time.astimezone(self.jst)
                     
-                    # 翻訳処理
-                    original_text = tweet_text
-                    translated_text, source_lang = self.translate_text(tweet_text, self.translate_to)
-                    
-                    # 表示用テキスト準備
-                    display_text = translated_text if translated_text != original_text else original_text
-                    
                     # テキスト長制限
-                    if len(display_text) > 300:
-                        display_text = display_text[:300] + "..."
+                    display_text = tweet_text if len(tweet_text) <= 300 else tweet_text[:300] + "..."
                     
                     # エンゲージメント情報
                     metrics = tweet_data.get('public_metrics', {})
                     engagement = f"\n💬 {metrics.get('reply_count', 0)} | 🔄 {metrics.get('retweet_count', 0)} | ❤️ {metrics.get('like_count', 0)} | 👀 {metrics.get('impression_count', 0)}"
                     
-                    # 翻訳情報を追加
-                    translation_info = ""
-                    if translated_text != original_text and source_lang:
-                        lang_names = {
-                            'en': '英語', 'ko': '韓国語', 'zh': '中国語', 'es': 'スペイン語',
-                            'fr': 'フランス語', 'de': 'ドイツ語', 'it': 'イタリア語', 'pt': 'ポルトガル語',
-                            'ru': 'ロシア語', 'ar': 'アラビア語', 'hi': 'ヒンディー語', 'th': 'タイ語'
-                        }
-                        source_lang_name = lang_names.get(source_lang, source_lang.upper())
-                        translation_info = f"\n🌐 {source_lang_name}から翻訳"
-                    
                     embed = {
                         "title": f"🚨 キーワード検出: {', '.join(matched_keywords)}",
-                        "description": display_text + engagement + translation_info,
+                        "description": display_text + engagement,
                         "color": 0x1DA1F2,
                         "fields": [
                             {
@@ -382,19 +317,11 @@ jobs:
                             }
                         ],
                         "footer": {
-                            "text": f"Twitter監視Bot v3.1 | 実行時刻: {datetime.now(self.jst).strftime('%H:%M')}",
+                            "text": f"Twitter監視Bot v3.0 | 実行時刻: {datetime.now(self.jst).strftime('%H:%M')}",
                             "icon_url": "https://abs.twimg.com/icons/apple-touch-icon-192x192.png"
                         },
                         "timestamp": created_at
                     }
-                    
-                    # 翻訳前の原文も表示（翻訳された場合のみ）
-                    if translated_text != original_text and len(original_text) <= 200:
-                        embed["fields"].insert(-1, {
-                            "name": "📝 原文",
-                            "value": f"```{original_text}```",
-                            "inline": False
-                        })
                     
                     payload = {
                         "embeds": [embed],
