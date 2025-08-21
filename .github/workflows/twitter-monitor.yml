@@ -3,7 +3,7 @@ name: Twitter Discord Bot
 on:
   schedule:
     # 10分ごとに実行（UTCタイム）
-    - cron: '*/10 * * * *'
+    - cron: '*/5 * * * *'
   # 手動実行も可能
   workflow_dispatch:
 
