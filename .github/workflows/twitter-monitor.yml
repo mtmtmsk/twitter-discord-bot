@@ -1,8 +1,8 @@
-name: Twitter Discord Bot (改善版)
+name: Twitter Discord Bot (デバッグ強化版)
 
 on:
   schedule:
-    # 5分ごとに実行（API制限を考慮して最適化）
+    # 5分ごとに実行
     - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
@@ -10,6 +10,10 @@ on:
         description: '強制実行（テスト用）'
         required: false
         default: 'false'
+      debug_level:
+        description: 'デバッグレベル (1-3)'
+        required: false
+        default: '2'
 
 jobs:
   monitor-twitter:
@@ -39,14 +43,70 @@ jobs:
       run: |
         pip install requests pytz
     
+    # 環境変数の検証
+    - name: Validate environment variables
+      run: |
+        echo "🔍 環境変数チェック開始..."
+        if [ -z "$BEARER_TOKEN" ]; then echo "❌ BEARER_TOKEN が設定されていません"; exit 1; fi
+        if [ -z "$DISCORD_WEBHOOK" ]; then echo "❌ DISCORD_WEBHOOK が設定されていません"; exit 1; fi
+        if [ -z "$TARGET_USER" ]; then echo "❌ TARGET_USER が設定されていません"; exit 1; fi
+        if [ -z "$KEYWORDS" ]; then echo "❌ KEYWORDS が設定されていません"; exit 1; fi
+        echo "✅ 基本環境変数OK"
+        echo "📊 TARGET_USER: $TARGET_USER"
+        echo "📊 KEYWORDS: $KEYWORDS"
+        echo "📊 WEBHOOK URL 長さ: ${#DISCORD_WEBHOOK}"
+      env:
+        BEARER_TOKEN: ${{ secrets.BEARER_TOKEN }}
+        DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        TARGET_USER: ${{ secrets.TARGET_USER }}
+        KEYWORDS: ${{ secrets.KEYWORDS }}
+    
+    # Discord Webhook テスト
+    - name: Test Discord webhook
+      run: |
+        python << 'EOF'
+        import requests
+        import os
+        import json
+        from datetime import datetime
+        
+        webhook_url = os.environ.get('DISCORD_WEBHOOK')
+        
+        test_payload = {
+            "content": "🧪 **Webhook接続テスト**",
+            "embeds": [{
+                "title": "✅ GitHub Actions → Discord 接続確認",
+                "description": f"実行時刻: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+                "color": 0x00ff00,
+                "footer": {"text": "Twitter Bot 接続テスト"}
+            }]
+        }
+        
+        try:
+            print("🔄 Discord Webhook テスト実行中...")
+            response = requests.post(webhook_url, json=test_payload, timeout=30)
+            print(f"📡 レスポンス: {response.status_code}")
+            print(f"📡 ヘッダー: {dict(response.headers)}")
+            
+            if response.status_code in [200, 204]:
+                print("✅ Webhook テスト成功！")
+            else:
+                print(f"❌ Webhook エラー: {response.status_code}")
+                print(f"📝 レスポンス内容: {response.text}")
+        except Exception as e:
+            print(f"❌ Webhook テスト失敗: {e}")
+        EOF
+      env:
+        DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+    
     - name: Run Twitter monitor
       env:
         BEARER_TOKEN: ${{ secrets.BEARER_TOKEN }}
         DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         TARGET_USER: ${{ secrets.TARGET_USER }}
         KEYWORDS: ${{ secrets.KEYWORDS }}
-        # デバッグ用設定
-        DEBUG_MODE: ${{ secrets.DEBUG_MODE || 'false' }}
+        DEBUG_MODE: 'true'
+        DEBUG_LEVEL: ${{ github.event.inputs.debug_level || '2' }}
         MAX_TWEETS_PER_RUN: ${{ secrets.MAX_TWEETS_PER_RUN || '10' }}
         NOTIFICATION_COOLDOWN: ${{ secrets.NOTIFICATION_COOLDOWN || '300' }}
       run: |
@@ -68,6 +128,7 @@ jobs:
                 self.target_user = os.environ.get('TARGET_USER')
                 self.keywords = [k.strip() for k in os.environ.get('KEYWORDS', '').split(',') if k.strip()]
                 self.debug_mode = os.environ.get('DEBUG_MODE', 'false').lower() == 'true'
+                self.debug_level = int(os.environ.get('DEBUG_LEVEL', '2'))
                 self.max_tweets_per_run = int(os.environ.get('MAX_TWEETS_PER_RUN', '10'))
                 self.notification_cooldown = int(os.environ.get('NOTIFICATION_COOLDOWN', '300'))
                 
@@ -83,24 +144,68 @@ jobs:
                 # Twitter API headers
                 self.headers = {
                     'Authorization': f'Bearer {self.bearer_token}',
-                    'User-Agent': 'TwitterBot/3.0'
+                    'User-Agent': 'TwitterBot/3.1'
                 }
                 
                 # 日本時間設定
                 self.jst = pytz.timezone('Asia/Tokyo')
                 
-                self.log(f"🤖 Twitter Monitor Bot v3.0 起動")
+                self.log(f"🤖 Twitter Monitor Bot v3.1 起動 (デバッグレベル: {self.debug_level})")
                 self.log(f"🎯 監視対象: @{self.target_user}")
                 self.log(f"🔑 キーワード: {', '.join(self.keywords)}")
-                self.log(f"🐛 デバッグモード: {'ON' if self.debug_mode else 'OFF'}")
+                self.log(f"🔗 Webhook URL: {'設定済み' if self.webhook_url else '未設定'}")
+                
+                # 設定検証
+                self.validate_config()
+        
+            def validate_config(self):
+                """設定の検証"""
+                issues = []
+                if not self.bearer_token:
+                    issues.append("BEARER_TOKEN未設定")
+                if not self.webhook_url:
+                    issues.append("DISCORD_WEBHOOK未設定")
+                elif not self.webhook_url.startswith('https://discord.com/api/webhooks/'):
+                    issues.append("DISCORD_WEBHOOK形式が不正")
+                if not self.target_user:
+                    issues.append("TARGET_USER未設定")
+                if not self.keywords:
+                    issues.append("KEYWORDS未設定")
+                
+                if issues:
+                    self.log(f"❌ 設定問題: {', '.join(issues)}", "ERROR")
+                    raise ValueError(f"設定問題: {', '.join(issues)}")
+                else:
+                    self.log("✅ 設定検証完了")
         
             def log(self, message, level="INFO"):
                 """改善されたログ出力"""
                 timestamp = datetime.now(self.jst).strftime('%Y-%m-%d %H:%M:%S JST')
                 print(f"[{timestamp}] [{level}] {message}")
+                
+                # デバッグレベル3の場合は詳細ログもDiscordに送信
+                if self.debug_level >= 3 and level in ["ERROR", "WARNING"] and hasattr(self, 'webhook_url'):
+                    self.send_debug_log(message, level)
+        
+            def send_debug_log(self, message, level):
+                """デバッグログをDiscordに送信"""
+                try:
+                    color_map = {"ERROR": 0xff0000, "WARNING": 0xff9900, "INFO": 0x0099ff}
+                    
+                    embed = {
+                        "title": f"🐛 デバッグログ [{level}]",
+                        "description": f"```{message[:1500]}```",
+                        "color": color_map.get(level, 0x808080),
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                    
+                    payload = {"embeds": [embed]}
+                    requests.post(self.webhook_url, json=payload, timeout=10)
+                except:
+                    pass  # デバッグログの送信エラーは無視
         
             def load_state(self):
-                """状態ファイルの読み込み（永続化対応）"""
+                """状態ファイルの読み込み"""
                 try:
                     with open('bot_state.json', 'r', encoding='utf-8') as f:
                         state = json.load(f)
@@ -114,7 +219,7 @@ jobs:
                         'total_notifications': 0,
                         'total_tweets_processed': 0
                     }
-                except json.JSONDecodeError as e:
+                except Exception as e:
                     self.log(f"❌ 状態ファイル読み込みエラー: {e}", "ERROR")
                     return {}
         
@@ -128,73 +233,42 @@ jobs:
                 except Exception as e:
                     self.log(f"❌ 状態ファイル保存エラー: {e}", "ERROR")
         
-            def load_processed_tweets(self):
-                """処理済みツイートリストの読み込み"""
-                try:
-                    with open('processed_tweets.json', 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        # 24時間以上古い記録は削除
-                        cutoff_time = datetime.utcnow() - timedelta(hours=24)
-                        filtered_data = {
-                            tweet_id: timestamp for tweet_id, timestamp in data.items()
-                            if datetime.fromisoformat(timestamp.replace('Z', '+00:00')) > cutoff_time
-                        }
-                        self.log(f"🧹 処理済みツイート: {len(data)} → {len(filtered_data)} (24時間でクリーンアップ)")
-                        return filtered_data
-                except FileNotFoundError:
-                    self.log("📂 処理済みツイートファイルを新規作成")
-                    return {}
-                except Exception as e:
-                    self.log(f"❌ 処理済みツイート読み込みエラー: {e}", "ERROR")
-                    return {}
-        
-            def save_processed_tweets(self, processed_tweets):
-                """処理済みツイートリストの保存"""
-                try:
-                    with open('processed_tweets.json', 'w', encoding='utf-8') as f:
-                        json.dump(processed_tweets, f, ensure_ascii=False, indent=2)
-                except Exception as e:
-                    self.log(f"❌ 処理済みツイート保存エラー: {e}", "ERROR")
-        
             def make_api_request(self, url, params=None, max_retries=3):
-                """API リクエスト（リトライ機能付き）"""
+                """API リクエスト（デバッグ強化版）"""
                 self.stats['api_calls'] += 1
+                
+                if self.debug_level >= 2:
+                    self.log(f"🌐 API Request: {url}")
+                    if params:
+                        self.log(f"📝 Parameters: {params}")
                 
                 for attempt in range(max_retries):
                     try:
-                        if self.debug_mode:
-                            self.log(f"🌐 API Request (試行 {attempt + 1}): {url}")
-                        
                         response = requests.get(url, headers=self.headers, params=params, timeout=30)
+                        
+                        if self.debug_level >= 3:
+                            self.log(f"📡 Response: {response.status_code} - {len(response.text)}文字")
                         
                         if response.status_code == 200:
                             return response
                         elif response.status_code == 429:
-                            self.log(f"⚠️ API制限に達しました (試行 {attempt + 1})", "WARNING")
+                            reset_time = response.headers.get('x-rate-limit-reset')
+                            self.log(f"⚠️ API制限 (リセット時刻: {reset_time})", "WARNING")
                             if attempt < max_retries - 1:
-                                wait_time = (2 ** attempt) * 60  # 指数バックオフ（分）
+                                wait_time = min((2 ** attempt) * 60, 900)  # 最大15分
                                 self.log(f"⏳ {wait_time}秒待機中...")
                                 time.sleep(wait_time)
                                 continue
-                            else:
-                                self.log("❌ API制限により処理を中断", "ERROR")
-                                return None
                         elif response.status_code == 401:
                             self.log("❌ 認証エラー: Bearer Tokenを確認してください", "ERROR")
                             return None
                         else:
-                            self.log(f"❌ API エラー: {response.status_code} - {response.text}", "ERROR")
+                            self.log(f"❌ API エラー: {response.status_code} - {response.text[:200]}", "ERROR")
                             if attempt < max_retries - 1:
                                 time.sleep(5)
                                 continue
-                            return None
                             
-                    except requests.exceptions.Timeout:
-                        self.log(f"⏱️ タイムアウト (試行 {attempt + 1})", "WARNING")
-                        if attempt < max_retries - 1:
-                            time.sleep(10)
-                            continue
-                    except requests.exceptions.RequestException as e:
+                    except Exception as e:
                         self.log(f"📡 リクエストエラー (試行 {attempt + 1}): {e}", "WARNING")
                         if attempt < max_retries - 1:
                             time.sleep(5)
@@ -215,17 +289,20 @@ jobs:
                     user_data = response.json()
                     if 'data' not in user_data:
                         self.log(f"❌ ユーザー '{self.target_user}' が見つかりません", "ERROR")
+                        if 'errors' in user_data:
+                            self.log(f"📝 APIエラー詳細: {user_data['errors']}", "ERROR")
                         return None
                     
                     user_id = user_data['data']['id']
                     self.log(f"✅ ユーザーID取得: {user_id}")
                     return user_id
-                except json.JSONDecodeError as e:
+                    
+                except Exception as e:
                     self.log(f"❌ ユーザーデータ解析エラー: {e}", "ERROR")
                     return None
         
             def get_recent_tweets(self, user_id, since_id=None):
-                """最新ツイートを取得（改善版）"""
+                """最新ツイートを取得"""
                 tweets_url = f'https://api.twitter.com/2/users/{user_id}/tweets'
                 
                 params = {
@@ -234,16 +311,16 @@ jobs:
                     'exclude': 'retweets,replies'
                 }
                 
-                # 前回処理したツイートIDがある場合は、それ以降のみ取得
                 if since_id:
                     params['since_id'] = since_id
                     self.log(f"📊 since_id指定: {since_id}")
                 else:
-                    # since_idがない場合は過去10分のツイートのみ
+                    # 過去15分のツイートを取得
                     end_time = datetime.utcnow()
-                    start_time = end_time - timedelta(minutes=10)
+                    start_time = end_time - timedelta(minutes=15)
                     params['start_time'] = start_time.strftime('%Y-%m-%dT%H:%M:%SZ')
                     params['end_time'] = end_time.strftime('%Y-%m-%dT%H:%M:%SZ')
+                    self.log(f"🕐 時間範囲: {start_time.strftime('%H:%M')} - {end_time.strftime('%H:%M')} UTC")
                 
                 response = self.make_api_request(tweets_url, params)
                 
@@ -253,33 +330,72 @@ jobs:
                 try:
                     tweets_data = response.json()
                     
-                    if 'data' not in tweets_data or not tweets_data['data']:
-                        self.log("ℹ️ 新しいツイートはありません")
+                    if self.debug_level >= 2:
+                        self.log(f"📊 APIレスポンス keys: {list(tweets_data.keys())}")
+                    
+                    if 'data' not in tweets_data:
+                        if 'errors' in tweets_data:
+                            self.log(f"❌ Twitter API エラー: {tweets_data['errors']}", "ERROR")
+                        else:
+                            self.log("ℹ️ 新しいツイートはありません")
                         return []
                     
                     tweets = tweets_data['data']
                     self.log(f"📝 {len(tweets)}件のツイートを取得")
                     self.stats['tweets_checked'] += len(tweets)
                     
+                    if self.debug_level >= 2:
+                        for i, tweet in enumerate(tweets[:3]):  # 最初の3件をサンプル表示
+                            self.log(f"📄 Tweet {i+1}: {tweet['text'][:50]}...")
+                    
                     return tweets
-                except json.JSONDecodeError as e:
+                    
+                except Exception as e:
                     self.log(f"❌ ツイートデータ解析エラー: {e}", "ERROR")
                     return None
         
             def check_keywords(self, text, keywords):
-                """キーワードチェック（改善版）"""
+                """キーワードチェック"""
                 matched_keywords = []
                 text_lower = text.lower()
                 
                 for keyword in keywords:
-                    # 完全一致、部分一致、正規表現対応
-                    if re.search(re.escape(keyword.lower()), text_lower):
+                    if keyword.lower() in text_lower:
                         matched_keywords.append(keyword)
+                        if self.debug_level >= 2:
+                            self.log(f"🎯 キーワードマッチ: '{keyword}' in '{text[:30]}...'")
                 
                 return matched_keywords
         
+            def test_discord_webhook(self):
+                """Discord Webhook のテスト"""
+                test_payload = {
+                    "content": "🧪 **Bot動作テスト**",
+                    "embeds": [{
+                        "title": "✅ Twitter監視Bot テスト通知",
+                        "description": f"実行時刻: {datetime.now(self.jst).strftime('%Y-%m-%d %H:%M:%S JST')}",
+                        "color": 0x00ff00,
+                        "fields": [
+                            {"name": "監視対象", "value": f"@{self.target_user}", "inline": True},
+                            {"name": "キーワード", "value": ", ".join(self.keywords), "inline": True}
+                        ]
+                    }]
+                }
+                
+                try:
+                    response = requests.post(self.webhook_url, json=test_payload, timeout=30)
+                    if response.status_code in [200, 204]:
+                        self.log("✅ Discord Webhook テスト成功")
+                        return True
+                    else:
+                        self.log(f"❌ Discord Webhook テストエラー: {response.status_code}", "ERROR")
+                        return False
+                except Exception as e:
+                    self.log(f"❌ Discord Webhook テスト失敗: {e}", "ERROR")
+                    return False
+        
             def send_discord_notification(self, tweet_text, matched_keywords, tweet_data):
-                """Discord通知送信（エラー処理強化版）"""
+                """Discord通知送信（デバッグ強化版）"""
                 try:
                     tweet_id = tweet_data['id']
                     created_at = tweet_data['created_at']
@@ -291,13 +407,9 @@ jobs:
                     # テキスト長制限
                     display_text = tweet_text if len(tweet_text) <= 300 else tweet_text[:300] + "..."
                     
-                    # エンゲージメント情報
-                    metrics = tweet_data.get('public_metrics', {})
-                    engagement = f"\n💬 {metrics.get('reply_count', 0)} | 🔄 {metrics.get('retweet_count', 0)} | ❤️ {metrics.get('like_count', 0)} | 👀 {metrics.get('impression_count', 0)}"
-                    
                     embed = {
                         "title": f"🚨 キーワード検出: {', '.join(matched_keywords)}",
-                        "description": display_text + engagement,
+                        "description": display_text,
                         "color": 0x1DA1F2,
                         "fields": [
                             {
@@ -317,8 +429,7 @@ jobs:
                             }
                         ],
                         "footer": {
-                            "text": f"Twitter監視Bot v3.0 | 実行時刻: {datetime.now(self.jst).strftime('%H:%M')}",
-                            "icon_url": "https://abs.twimg.com/icons/apple-touch-icon-192x192.png"
+                            "text": f"Twitter監視Bot v3.1 | Debug Level: {self.debug_level}",
                         },
                         "timestamp": created_at
                     }
@@ -329,10 +440,17 @@ jobs:
                         "avatar_url": "https://abs.twimg.com/icons/apple-touch-icon-192x192.png"
                     }
                     
+                    if self.debug_level >= 2:
+                        self.log(f"📤 Discord通知送信準備: {len(json.dumps(payload))}文字")
+                    
                     # Discord API にリトライ付きで送信
                     for attempt in range(3):
                         try:
                             response = requests.post(self.webhook_url, json=payload, timeout=30)
+                            
+                            if self.debug_level >= 2:
+                                self.log(f"📡 Discord Response: {response.status_code}")
+                            
                             if response.status_code in [200, 204]:
                                 self.log(f"✅ Discord通知送信成功 (試行: {attempt + 1})")
                                 self.stats['notifications_sent'] += 1
@@ -343,9 +461,9 @@ jobs:
                                 time.sleep(wait_time)
                                 continue
                             else:
-                                self.log(f"❌ Discord通知エラー: {response.status_code}", "ERROR")
+                                self.log(f"❌ Discord通知エラー: {response.status_code} - {response.text[:200]}", "ERROR")
                                 
-                        except requests.exceptions.RequestException as e:
+                        except Exception as e:
                             self.log(f"❌ Discord通知送信エラー (試行 {attempt + 1}): {e}", "ERROR")
                             if attempt < 2:
                                 time.sleep(5)
@@ -356,67 +474,75 @@ jobs:
                     
                 except Exception as e:
                     self.log(f"❌ 通知処理中の予期しないエラー: {e}", "ERROR")
-                    traceback.print_exc()
+                    if self.debug_level >= 3:
+                        traceback.print_exc()
                     return False
         
             def send_summary_notification(self):
                 """実行結果サマリーをDiscordに送信"""
-                if not self.debug_mode:
-                    return
-                
                 runtime = datetime.utcnow() - self.stats['start_time']
                 
+                status_color = 0x00ff00 if self.stats['errors'] == 0 else (0xff9900 if self.stats['errors'] < 3 else 0xff0000)
+                status_text = "正常" if self.stats['errors'] == 0 else f"警告({self.stats['errors']}エラー)"
+                
                 embed = {
-                    "title": "📊 実行結果サマリー",
-                    "color": 0x00ff00 if self.stats['errors'] == 0 else 0xff9900,
+                    "title": f"📊 実行結果サマリー - {status_text}",
+                    "color": status_color,
                     "fields": [
                         {"name": "🔍 チェックしたツイート数", "value": str(self.stats['tweets_checked']), "inline": True},
                         {"name": "🔔 送信した通知数", "value": str(self.stats['notifications_sent']), "inline": True},
                         {"name": "🌐 API呼び出し回数", "value": str(self.stats['api_calls']), "inline": True},
                         {"name": "❌ エラー回数", "value": str(self.stats['errors']), "inline": True},
                         {"name": "⏱️ 実行時間", "value": f"{runtime.total_seconds():.1f}秒", "inline": True},
-                        {"name": "🕐 実行時刻", "value": datetime.now(self.jst).strftime("%H:%M JST"), "inline": True}
+                        {"name": "🕐 実行時刻", "value": datetime.now(self.jst).strftime("%m/%d %H:%M JST"), "inline": True}
                     ],
-                    "footer": {"text": "デバッグモード - サマリー通知"}
+                    "footer": {"text": f"デバッグレベル {self.debug_level} | v3.1"},
+                    "timestamp": datetime.utcnow().isoformat()
                 }
                 
                 payload = {"embeds": [embed]}
                 
                 try:
-                    requests.post(self.webhook_url, json=payload, timeout=10)
-                except:
-                    pass  # サマリー送信エラーは無視
+                    response = requests.post(self.webhook_url, json=payload, timeout=10)
+                    if response.status_code not in [200, 204]:
+                        self.log(f"⚠️ サマリー送信エラー: {response.status_code}", "WARNING")
+                except Exception as e:
+                    self.log(f"⚠️ サマリー送信失敗: {e}", "WARNING")
         
             def run(self):
                 """メイン処理"""
                 try:
-                    # 環境変数チェック
-                    if not all([self.bearer_token, self.webhook_url, self.target_user, self.keywords]):
-                        self.log("❌ 必要な環境変数が設定されていません", "ERROR")
-                        return
+                    self.log("🚀 メイン処理開始")
+                    
+                    # Discord Webhook テスト（デバッグレベル2以上の場合）
+                    if self.debug_level >= 2:
+                        if not self.test_discord_webhook():
+                            self.log("❌ Discord Webhook テストに失敗しました", "ERROR")
+                            return
                     
                     # 状態読み込み
                     state = self.load_state()
-                    processed_tweets = self.load_processed_tweets()
                     
                     # ユーザーID取得
                     user_id = self.get_user_id()
                     if not user_id:
+                        self.log("❌ ユーザーID取得失敗", "ERROR")
                         return
                     
                     # ツイート取得
                     tweets = self.get_recent_tweets(user_id, state.get('last_tweet_id'))
                     if tweets is None:
+                        self.log("❌ ツイート取得失敗", "ERROR")
                         return
                     
                     if not tweets:
                         self.log("✅ 新しいツイートはありませんでした")
-                        self.send_summary_notification()
+                        if self.debug_level >= 1:
+                            self.send_summary_notification()
                         return
                     
-                    # 新しいツイートを時系列順で処理（古い順）
-                    tweets.sort(key=lambda x: x['created_at'])
-                    
+                    # ツイート処理
+                    tweets.sort(key=lambda x: x['created_at'])  # 古い順
                     notifications_sent = 0
                     new_last_tweet_id = state.get('last_tweet_id')
                     
@@ -424,71 +550,50 @@ jobs:
                         tweet_id = tweet['id']
                         tweet_text = tweet['text']
                         
-                        # 重複チェック
-                        if tweet_id in processed_tweets:
-                            self.log(f"⏭️ 既に処理済み: {tweet_id}")
-                            continue
-                        
-                        # 言語チェック（日本語ツイートのみ対象にする場合）
-                        # if tweet.get('lang') != 'ja':
-                        #     continue
+                        if self.debug_level >= 2:
+                            self.log(f"🔍 ツイート分析: {tweet_id}")
                         
                         # キーワードチェック
                         matched_keywords = self.check_keywords(tweet_text, self.keywords)
                         
                         if matched_keywords:
-                            # クールダウンチェック（同じキーワードで短時間に複数通知を防ぐ）
-                            cooldown_key = f"{'-'.join(sorted(matched_keywords))}"
-                            last_notification = processed_tweets.get(f"cooldown_{cooldown_key}")
-                            
-                            if last_notification:
-                                last_time = datetime.fromisoformat(last_notification.replace('Z', '+00:00'))
-                                if (datetime.utcnow() - last_time).total_seconds() < self.notification_cooldown:
-                                    self.log(f"⏳ クールダウン中: {matched_keywords}")
-                                    processed_tweets[tweet_id] = datetime.utcnow().isoformat()
-                                    continue
+                            self.log(f"🎯 キーワード検出: {matched_keywords}")
+                            self.log(f"📝 ツイート内容: {tweet_text[:100]}...")
                             
                             # 通知送信
                             success = self.send_discord_notification(tweet_text, matched_keywords, tweet)
                             
                             if success:
                                 notifications_sent += 1
-                                processed_tweets[tweet_id] = datetime.utcnow().isoformat()
-                                processed_tweets[f"cooldown_{cooldown_key}"] = datetime.utcnow().isoformat()
-                                
-                                self.log(f"🎉 通知送信: {matched_keywords}")
-                                self.log(f"   ツイート: {tweet_text[:50]}...")
+                                self.log(f"🎉 通知送信成功: {matched_keywords}")
                             else:
-                                self.log(f"❌ 通知送信失敗: {tweet_id}")
-                        else:
-                            # キーワードにマッチしなくても処理済みとして記録
-                            processed_tweets[tweet_id] = datetime.utcnow().isoformat()
+                                self.log(f"❌ 通知送信失敗: {tweet_id}", "ERROR")
                         
-                        # 最新のツイートIDを更新
                         new_last_tweet_id = tweet_id
                     
                     # 状態保存
                     state['last_tweet_id'] = new_last_tweet_id
                     state['total_notifications'] = state.get('total_notifications', 0) + notifications_sent
                     state['total_tweets_processed'] = state.get('total_tweets_processed', 0) + len(tweets)
-                    
                     self.save_state(state)
-                    self.save_processed_tweets(processed_tweets)
                     
                     # 結果出力
                     self.log(f"🎯 処理完了: {len(tweets)}件のツイートを確認, {notifications_sent}件の通知を送信")
-                    self.send_summary_notification()
+                    
+                    # サマリー送信
+                    if self.debug_level >= 1 or notifications_sent > 0:
+                        self.send_summary_notification()
                     
                 except Exception as e:
                     self.log(f"❌ 予期しないエラー: {e}", "ERROR")
-                    traceback.print_exc()
-                    self.stats['errors'] += 1
+                    if self.debug_level >= 2:
+                        traceback.print_exc()
                     
                     # エラー通知
                     try:
                         error_embed = {
-                            "title": "🚨 Twitter Bot エラー",
-                            "description": f"```{str(e)[:1000]}```",
+                            "title": "🚨 Twitter Bot 重大エラー",
+                            "description": f"```{str(e)[:1500]}```",
                             "color": 0xff0000,
                             "timestamp": datetime.utcnow().isoformat()
                         }
@@ -501,3 +606,47 @@ jobs:
             bot = TwitterMonitorBot()
             bot.run()
         EOF
+        # 現在のYAMLファイルに以下のステップを追加してください：
+
+# 既存の "Install dependencies" ステップの後に追加：
+    - name: Test Discord webhook connection
+      run: |
+        python << 'EOF'
+        import requests
+        import os
+        from datetime import datetime
+        
+        webhook_url = os.environ.get('DISCORD_WEBHOOK')
+        
+        # 基本的な接続テスト
+        test_payload = {
+            "content": "🧪 **接続テスト**",
+            "embeds": [{
+                "title": "✅ GitHub Actions → Discord 接続確認",
+                "description": f"実行時刻: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
+                "color": 0x00ff00
+            }]
+        }
+        
+        try:
+            print("🔄 Discord Webhook テスト実行中...")
+            response = requests.post(webhook_url, json=test_payload, timeout=30)
+            print(f"📡 ステータス: {response.status_code}")
+            print(f"📡 レスポンス: {response.text}")
+            
+            if response.status_code in [200, 204]:
+                print("✅ Webhook 接続成功！")
+            else:
+                print(f"❌ Webhook 接続失敗: {response.status_code}")
+                print("🔍 Discord Webhook URLを確認してください")
+        except Exception as e:
+            print(f"❌ 接続エラー: {e}")
+            print("🔍 ネットワークまたはURL設定を確認してください")
+        EOF
+      env:
+        DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+
+# 既存の "Run Twitter monitor" ステップの env セクションに追加：
+        DEBUG_MODE: 'true'  # この行を追加
+        
+# そして、Pythonコードの send_discord_notification 関数を以下に置き換え：
